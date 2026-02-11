@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NetBox ORB Agent Builder v4.4</title>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body>
+    <div id="root"></div>
+    <script type="text/babel">
+        const { useState } = React;
+        const Icon = ({ d, className = "w-5 h-5" }) => (
+            <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2">
+                <path strokeLinecap="round" strokeLinejoin="round" d={d} />
+            </svg>
+        );
+
+        const App = () => {
+            const [tab, setTab] = useState('common');
+            const [common, setCommon] = useState({ configManager: 'local', agentName: 'enterprise_agent_01', enableNetworkDiscovery: true, enableDeviceDiscovery: true });
+            const [env, setEnv] = useState({ diodeTarget: 'https://your-instance.netboxcloud.com/diode', diodeClientId: '', diodeClientSecret: '' });
+            const [credentialMode, setCredentialMode] = useState('env');
+            const [vaultConfig, setVaultConfig] = useState({ address: 'https://vault.example.com:8200', authMethod: 'token', token: '', roleId: '', secretId: '', kubernetesRole: '', namespace: 'secret' });
+            const [deviceCredentials, setDeviceCredentials] = useState([{
+                name: 'production_core', description: 'Production core network devices', securityZone: 'production',
+                username: 'netops_prod', password: '', enablePassword: '', vaultPath: 'secret/data/network/production/core',
+                usernameKey: 'username', passwordKey: 'password', enablePasswordKey: 'enable_password',
+                sshPort: 22, connectionTimeout: 30, tags: ['production', 'core']
+            }]);
+            const [networkPolicies, setNetworkPolicies] = useState([{ name: 'headquarters', schedule: '0 */2 * * *', scheduleComment: 'Every 2 hours', timeout: 5, fastMode: false, targets: ['192.168.0.0/16'] }]);
+            const [devicePolicies, setDevicePolicies] = useState([{ name: 'cisco_devices', schedule: '0 */6 * * *', scheduleComment: 'Every 6 hours', defaultSite: 'Headquarters', credentialRef: 'production_core', devices: [{ driver: 'ios', hostname: '192.168.1.1', credentialOverride: '' }] }]);
+
+            const presets = {
+                prod_core: { name: 'production_core', description: 'Production core infrastructure', securityZone: 'production', username: 'netops_prod', vaultPath: 'secret/data/network/production/core', tags: ['production', 'core'] },
+                prod_edge: { name: 'production_edge', description: 'Production edge devices', securityZone: 'production', username: 'netops_edge', vaultPath: 'secret/data/network/production/edge', tags: ['production', 'edge'] },
+                dmz: { name: 'dmz_devices', description: 'DMZ security devices', securityZone: 'dmz', username: 'netops_dmz', vaultPath: 'secret/data/network/dmz/devices', tags: ['dmz', 'security'] },
+                staging: { name: 'staging_devices', description: 'Staging environment', securityZone: 'staging', username: 'netops_staging', vaultPath: 'secret/data/network/staging/devices', tags: ['staging', 'test'] }
+            };
+
+            const genEnv = () => {
+                let e = `# NetBox ORB Agent Environment - ${new Date().toISOString()}\n\nDIODE_TARGET=${env.diodeTarget}\nDIODE_CLIENT_ID=${env.diodeClientId}\nDIODE_CLIENT_SECRET=${env.diodeClientSecret}\n`;
+                if (credentialMode === 'env') {
+                    e += `\n# Device Credentials\n`;
+                    deviceCredentials.forEach(c => {
+                        const p = c.name.toUpperCase().replace(/[^A-Z0-9]/g, '_');
+                        e += `\n# ${c.name} - ${c.description || 'No description'}\n${p}_USERNAME=${c.username}\n${p}_PASSWORD=${c.password}`;
+                        if (c.enablePassword) e += `\n${p}_ENABLE_PASSWORD=${c.enablePassword}`;
+                        e += '\n';
+                    });
+                } else if (credentialMode === 'vault') {
+                    e += `\n# Vault Configuration\nVAULT_ADDR=${vaultConfig.address}\n`;
+                    if (vaultConfig.authMethod === 'token') e += `VAULT_TOKEN=${vaultConfig.token}\n`;
+                    else if (vaultConfig.authMethod === 'approle') e += `VAULT_ROLE_ID=${vaultConfig.roleId}\nVAULT_SECRET_ID=${vaultConfig.secretId}\n`;
+                    else if (vaultConfig.authMethod === 'kubernetes') e += `VAULT_KUBERNETES_ROLE=${vaultConfig.kubernetesRole}\n`;
+                    e += `VAULT_NAMESPACE=${vaultConfig.namespace}\n`;
+                }
+                return e;
+            };
+
+            const genYaml = () => {
+                let y = `# NetBox ORB Agent Configuration\n# Generated: ${new Date().toISOString()}\n\norb:\n  config_manager:\n    active: ${common.configManager}\n  backends:`;
+                if (common.enableNetworkDiscovery) y += `\n    network_discovery:`;
+                if (common.enableDeviceDiscovery) y += `\n    device_discovery:`;
+                y += `\n\n  common:\n    diode:\n      target: \${DIODE_TARGET}\n      client_id: \${DIODE_CLIENT_ID}\n      client_secret: \${DIODE_CLIENT_SECRET}\n      agent_name: ${common.agentName}\n`;
+                if (credentialMode === 'vault') {
+                    y += `\n    # Vault Configuration\n    vault:\n      address: \${VAULT_ADDR}\n      auth_method: ${vaultConfig.authMethod}\n`;
+                    if (vaultConfig.authMethod === 'token') y += `      token: \${VAULT_TOKEN}\n`;
+                    else if (vaultConfig.authMethod === 'approle') y += `      role_id: \${VAULT_ROLE_ID}\n      secret_id: \${VAULT_SECRET_ID}\n`;
+                    else if (vaultConfig.authMethod === 'kubernetes') y += `      kubernetes_role: \${VAULT_KUBERNETES_ROLE}\n`;
+                    y += `      namespace: ${vaultConfig.namespace}\n`;
+                }
+                if (credentialMode !== 'inline' && deviceCredentials.length > 0) {
+                    y += `\n    # Device Credentials\n    credentials:`;
+                    deviceCredentials.forEach(c => {
+                        y += `\n      # ${c.description || c.name}\n      ${c.name}:`;
+                        if (credentialMode === 'env') {
+                            const p = c.name.toUpperCase().replace(/[^A-Z0-9]/g, '_');
+                            y += `\n        username: \${${p}_USERNAME}\n        password: \${${p}_PASSWORD}`;
+                            if (c.enablePassword) y += `\n        enable_password: \${${p}_ENABLE_PASSWORD}`;
+                        } else {
+                            y += `\n        vault_path: ${c.vaultPath}\n        username_key: ${c.usernameKey}\n        password_key: ${c.passwordKey}`;
+                            if (c.enablePasswordKey) y += `\n        enable_password_key: ${c.enablePasswordKey}`;
+                        }
+                    });
+                }
+                y += `\n\n  # Discovery Policies\n  policies:`;
+                if (common.enableNetworkDiscovery && networkPolicies.length > 0) {
+                    y += `\n    # Network Discovery Policies\n    network_discovery:`;
+                    networkPolicies.forEach(p => {
+                        y += `\n      ${p.name}:\n        config:\n          schedule: "${p.schedule}"\n          timeout: ${p.timeout}`;
+                        if (p.fastMode) y += `\n          fast_mode: true`;
+                        y += `\n        scope:\n          targets:`;
+                        p.targets.forEach(t => y += `\n            - "${t}"`);
+                    });
+                }
+                if (common.enableDeviceDiscovery && devicePolicies.length > 0) {
+                    y += `\n    # Device Discovery Policies\n    device_discovery:`;
+                    devicePolicies.forEach(p => {
+                        y += `\n      ${p.name}:\n        config:\n          schedule: "${p.schedule}"`;
+                        if (credentialMode !== 'inline' && p.credentialRef) y += `\n          credentials: ${p.credentialRef}`;
+                        y += `\n        defaults:\n          site: ${p.defaultSite}\n        scope:`;
+                        p.devices.forEach(d => {
+                            y += `\n          - driver: ${d.driver}\n            hostname: ${d.hostname}`;
+                            if (credentialMode === 'inline') y += `\n            username: \${USERNAME}\n            password: \${PASSWORD}`;
+                            else if (d.credentialOverride) y += `\n            credentials: ${d.credentialOverride}`;
+                        });
+                    });
+                }
+                return y;
+            };
+
+            const dl = (content, name) => { const blob = new Blob([content], { type: 'text/plain' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = name; a.click(); URL.revokeObjectURL(url); };
+
+            return (
+                <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50 p-6">
+                    <div className="max-w-7xl mx-auto">
+                        <div className="bg-white rounded-xl shadow-xl p-8">
+                            <h1 className="text-3xl font-bold mb-2">NetBox ORB Agent Builder v4.4</h1>
+                            <p className="text-gray-600 mb-6">Enhanced multi-credential configuration with timeout and fastmode controls</p>
+
+                            <div className="flex gap-2 mb-6 border-b overflow-x-auto">
+                                {['common', 'credentials', 'network', 'device', 'output'].map(t => (
+                                    <button key={t} onClick={() => setTab(t)} className={`px-6 py-3 font-semibold ${tab === t ? 'border-b-2 border-blue-600 text-blue-600' : 'text-gray-600'}`}>{t.charAt(0).toUpperCase() + t.slice(1)}</button>
+                                ))}
+                            </div>
+
+                            {tab === 'common' && (
+                                <div className="space-y-6">
+                                    <div className="grid md:grid-cols-2 gap-6">
+                                        <div>
+                                            <label className="block text-sm font-medium mb-2">Agent Name</label>
+                                            <input type="text" value={common.agentName} onChange={e => setCommon({...common, agentName: e.target.value})} className="w-full px-3 py-2 border rounded-lg" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm font-medium mb-2">Diode Target</label>
+                                            <input type="text" value={env.diodeTarget} onChange={e => setEnv({...env, diodeTarget: e.target.value})} className="w-full px-3 py-2 border rounded-lg" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm font-medium mb-2">Client ID</label>
+                                            <input type="text" value={env.diodeClientId} onChange={e => setEnv({...env, diodeClientId: e.target.value})} className="w-full px-3 py-2 border rounded-lg" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm font-medium mb-2">Client Secret</label>
+                                            <input type="password" value={env.diodeClientSecret} onChange={e => setEnv({...env, diodeClientSecret: e.target.value})} className="w-full px-3 py-2 border rounded-lg" />
+                                        </div>
+                                    </div>
+                                    <div className="p-4 bg-gray-50 rounded-lg">
+                                        <label className="flex items-center gap-2 mb-2">
+                                            <input type="checkbox" checked={common.enableNetworkDiscovery} onChange={e => setCommon({...common, enableNetworkDiscovery: e.target.checked})} />
+                                            <span className="font-medium">Network Discovery</span>
+                                        </label>
+                                        <label className="flex items-center gap-2">
+                                            <input type="checkbox" checked={common.enableDeviceDiscovery} onChange={e => setCommon({...common, enableDeviceDiscovery: e.target.checked})} />
+                                            <span className="font-medium">Device Discovery</span>
+                                        </label>
+                                    </div>
+                                </div>
+                            )}
+
+                            {tab === 'credentials' && (
+                                <div className="space-y-6">
+                                    <div className="p-4 bg-gray-50 border rounded-lg space-y-3">
+                                        <label className="flex items-start gap-3 cursor-pointer p-3 bg-white rounded-lg border-2">
+                                            <input type="radio" name="credMode" value="env" checked={credentialMode === 'env'} onChange={e => setCredentialMode(e.target.value)} className="mt-1" />
+                                            <div><div className="font-medium">Environment Variables</div><div className="text-sm text-gray-600">Store in .env file</div></div>
+                                        </label>
+                                        <label className="flex items-start gap-3 cursor-pointer p-3 bg-white rounded-lg border-2">
+                                            <input type="radio" name="credMode" value="vault" checked={credentialMode === 'vault'} onChange={e => setCredentialMode(e.target.value)} className="mt-1" />
+                                            <div><div className="font-medium">HashiCorp Vault</div><div className="text-sm text-gray-600">Retrieve from Vault</div></div>
+                                        </label>
+                                        <label className="flex items-start gap-3 cursor-pointer p-3 bg-white rounded-lg border-2">
+                                            <input type="radio" name="credMode" value="inline" checked={credentialMode === 'inline'} onChange={e => setCredentialMode(e.target.value)} className="mt-1" />
+                                            <div><div className="font-medium">Inline (Not Recommended)</div><div className="text-sm text-red-600">Store in config file</div></div>
+                                        </label>
+                                    </div>
+
+                                    {credentialMode === 'vault' && (
+                                        <div className="p-5 bg-purple-50 border-2 border-purple-200 rounded-lg space-y-4">
+                                            <h3 className="font-semibold">Vault Configuration</h3>
+                                            <div className="grid md:grid-cols-2 gap-4">
+                                                <div className="md:col-span-2">
+                                                    <label className="block text-sm font-medium mb-2">Vault Address</label>
+                                                    <input type="text" value={vaultConfig.address} onChange={e => setVaultConfig({...vaultConfig, address: e.target.value})} className="w-full px-3 py-2 border rounded-lg" />
+                                                </div>
+                                                <div>
+                                                    <label className="block text-sm font-medium mb-2">Auth Method</label>
+                                                    <select value={vaultConfig.authMethod} onChange={e => setVaultConfig({...vaultConfig, authMethod: e.target.value})} className="w-full px-3 py-2 border rounded-lg">
+                                                        <option value="token">Token</option>
+                                                        <option value="approle">AppRole</option>
+                                                        <option value="kubernetes">Kubernetes</option>
+                                                    </select>
+                                                </div>
+                                                <div>
+                                                    <label className="block text-sm font-medium mb-2">Namespace</label>
+                                                    <input type="text" value={vaultConfig.namespace} onChange={e => setVaultConfig({...vaultConfig, namespace: e.target.value})} className="w-full px-3 py-2 border rounded-lg" />
+                                                </div>
+                                            </div>
+                                            {vaultConfig.authMethod === 'token' && (
+                                                <div>
+                                                    <label className="block text-sm font-medium mb-2">Token</label>
+                                                    <input type="password" value={vaultConfig.token} onChange={e => setVaultConfig({...vaultConfig, token: e.target.value})} className="w-full px-3 py-2 border rounded-lg font-mono" />
+                                                </div>
+                                            )}
+                                            {vaultConfig.authMethod === 'approle' && (
+                                                <div className="grid md:grid-cols-2 gap-4">
+                                                    <div>
+                                                        <label className="block text-sm font-medium mb-2">Role ID</label>
+                                                        <input type="text" value={vaultConfig.roleId} onChange={e => setVaultConfig({...vaultConfig, roleId: e.target.value})} className="w-full px-3 py-2 border rounded-lg font-mono" />
+                                                    </div>
+                                                    <div>
+                                                        <label className="block text-sm font-medium mb-2">Secret ID</label>
+                                                        <input type="password" value={vaultConfig.secretId} onChange={e => setVaultConfig({...vaultConfig, secretId: e.target.value})} className="w-full px-3 py-2 border rounded-lg font-mono" />
+                                                    </div>
+                                                </div>
+                                            )}
+                                            {vaultConfig.authMethod === 'kubernetes' && (
+                                                <div>
+                                                    <label className="block text-sm font-medium mb-2">K8s Role</label>
+                                                    <input type="text" value={vaultConfig.kubernetesRole} onChange={e => setVaultConfig({...vaultConfig, kubernetesRole: e.target.value})} className="w-full px-3 py-2 border rounded-lg" />
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+
+                                    {credentialMode !== 'inline' && (
+                                        <div>
+                                            <div className="flex justify-between mb-4">
+                                                <h3 className="font-semibold text-lg">Credential Sets ({deviceCredentials.length})</h3>
+                                                <select onChange={(e) => { if(e.target.value) { const p = presets[e.target.value]; setDeviceCredentials([...deviceCredentials, {...p, password: '', enablePassword: '', usernameKey: 'username', passwordKey: 'password', enablePasswordKey: 'enable_password', sshPort: 22, connectionTimeout: 30}]); e.target.value = ''; }}} className="px-4 py-2 bg-green-600 text-white rounded-lg">
+                                                    <option value="">+ Add Template</option>
+                                                    <option value="prod_core">Production Core</option>
+                                                    <option value="prod_edge">Production Edge</option>
+                                                    <option value="dmz">DMZ Devices</option>
+                                                    <option value="staging">Staging</option>
+                                                </select>
+                                            </div>
+                                            {deviceCredentials.map((c, i) => (
+                                                <div key={i} className="p-5 bg-gray-50 border-2 rounded-lg mb-4">
+                                                    <div className="flex justify-between mb-3">
+                                                        <div>
+                                                            <div className="flex items-center gap-2 mb-1">
+                                                                <h4 className="font-bold">{c.name}</h4>
+                                                                {c.securityZone && <span className={`px-2 py-0.5 text-xs rounded ${c.securityZone === 'production' ? 'bg-red-100 text-red-700' : c.securityZone === 'dmz' ? 'bg-orange-100 text-orange-700' : 'bg-gray-100 text-gray-700'}`}>{c.securityZone.toUpperCase()}</span>}
+                                                            </div>
+                                                            <p className="text-sm text-gray-600">{c.description}</p>
+                                                        </div>
+                                                        {deviceCredentials.length > 1 && <button onClick={() => setDeviceCredentials(deviceCredentials.filter((_, idx) => idx !== i))} className="text-red-600">Remove</button>}
+                                                    </div>
+                                                    <div className="grid md:grid-cols-2 gap-4">
+                                                        <div>
+                                                            <label className="block text-sm font-medium mb-2">Name</label>
+                                                            <input type="text" value={c.name} onChange={e => { const u = [...deviceCredentials]; u[i].name = e.target.value.replace(/[^a-zA-Z0-9_]/g, '_'); setDeviceCredentials(u); }} className="w-full px-3 py-2 border rounded-lg font-mono" />
+                                                        </div>
+                                                        <div>
+                                                            <label className="block text-sm font-medium mb-2">Security Zone</label>
+                                                            <select value={c.securityZone || ''} onChange={e => { const u = [...deviceCredentials]; u[i].securityZone = e.target.value; setDeviceCredentials(u); }} className="w-full px-3 py-2 border rounded-lg">
+                                                                <option value="">Select...</option>
+                                                                <option value="production">Production</option>
+                                                                <option value="staging">Staging</option>
+                                                                <option value="dmz">DMZ</option>
+                                                                <option value="iot">IoT</option>
+                                                            </select>
+                                                        </div>
+                                                        <div className="md:col-span-2">
+                                                            <label className="block text-sm font-medium mb-2">Description</label>
+                                                            <input type="text" value={c.description || ''} onChange={e => { const u = [...deviceCredentials]; u[i].description = e.target.value; setDeviceCredentials(u); }} className="w-full px-3 py-2 border rounded-lg" />
+                                                        </div>
+                                                        {credentialMode === 'env' ? (
+                                                            <>
+                                                                <div>
+                                                                    <label className="block text-sm font-medium mb-2">Username</label>
+                                                                    <input type="text" value={c.username} onChange={e => { const u = [...deviceCredentials]; u[i].username = e.target.value; setDeviceCredentials(u); }} className="w-full px-3 py-2 border rounded-lg" />
+                                                                </div>
+                                                                <div>
+                                                                    <label className="block text-sm font-medium mb-2">Password</label>
+                                                                    <input type="password" value={c.password} onChange={e => { const u = [...deviceCredentials]; u[i].password = e.target.value; setDeviceCredentials(u); }} className="w-full px-3 py-2 border rounded-lg" />
+                                                                </div>
+                                                            </>
+                                                        ) : (
+                                                            <>
+                                                                <div className="md:col-span-2">
+                                                                    <label className="block text-sm font-medium mb-2">Vault Path</label>
+                                                                    <input type="text" value={c.vaultPath} onChange={e => { const u = [...deviceCredentials]; u[i].vaultPath = e.target.value; setDeviceCredentials(u); }} className="w-full px-3 py-2 border rounded-lg font-mono" />
+                                                                </div>
+                                                            </>
+                                                        )}
+                                                    </div>
+                                                    {credentialMode === 'env' && (
+                                                        <div className="mt-3 p-3 bg-blue-50 rounded">
+                                                            <pre className="text-xs font-mono">{`${c.name.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_USERNAME=${c.username}\n${c.name.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_PASSWORD=your_password`}</pre>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
+                            {tab === 'network' && (
+                                <div className="space-y-6">
+                                    <div className="flex justify-between">
+                                        <h2 className="text-xl font-bold">Network Discovery Policies</h2>
+                                        <button onClick={() => setNetworkPolicies([...networkPolicies, { name: `policy_${networkPolicies.length + 1}`, schedule: '0 * * * *', scheduleComment: 'Every hour', timeout: 5, fastMode: false, targets: ['10.0.0.0/24'] }])} className="px-4 py-2 bg-blue-600 text-white rounded-lg">+ Add Policy</button>
+                                    </div>
+                                    {networkPolicies.map((p, i) => (
+                                        <div key={i} className="p-5 bg-gray-50 border-2 rounded-lg">
+                                            <div className="flex justify-between mb-4">
+                                                <input type="text" value={p.name} onChange={e => { const u = [...networkPolicies]; u[i].name = e.target.value; setNetworkPolicies(u); }} className="text-lg font-semibold px-3 py-1 border rounded" />
+                                                <button onClick={() => setNetworkPolicies(networkPolicies.filter((_, idx) => idx !== i))} className="text-red-600 font-medium">Remove</button>
+                                            </div>
+                                            
+                                            <div className="grid md:grid-cols-3 gap-4 mb-4">
+                                                <div>
+                                                    <label className="block text-sm font-medium mb-2">Schedule (Cron)</label>
+                                                    <input type="text" value={p.schedule} onChange={e => { const u = [...networkPolicies]; u[i].schedule = e.target.value; setNetworkPolicies(u); }} className="w-full px-3 py-2 border rounded-lg font-mono text-sm" placeholder="0 */2 * * *" />
+                                                    <p className="text-xs text-gray-500 mt-1">{p.scheduleComment || 'Cron expression'}</p>
+                                                </div>
+                                                
+                                                <div>
+                                                    <label className="block text-sm font-medium mb-2">Timeout (minutes)</label>
+                                                    <select value={p.timeout} onChange={e => { const u = [...networkPolicies]; u[i].timeout = parseInt(e.target.value); setNetworkPolicies(u); }} className="w-full px-3 py-2 border rounded-lg">
+                                                        <option value="1">1 minute</option>
+                                                        <option value="2">2 minutes</option>
+                                                        <option value="5">5 minutes</option>
+                                                        <option value="10">10 minutes</option>
+                                                        <option value="15">15 minutes</option>
+                                                        <option value="30">30 minutes</option>
+                                                        <option value="60">60 minutes</option>
+                                                    </select>
+                                                </div>
+                                                
+                                                <div>
+                                                    <label className="block text-sm font-medium mb-2">Fast Mode</label>
+                                                    <div className="flex items-center h-10">
+                                                        <label className="flex items-center gap-2 cursor-pointer">
+                                                            <input type="checkbox" checked={p.fastMode} onChange={e => { const u = [...networkPolicies]; u[i].fastMode = e.target.checked; setNetworkPolicies(u); }} className="w-4 h-4" />
+                                                            <span className="text-sm">{p.fastMode ? 'Enabled' : 'Disabled'}</span>
+                                                        </label>
+                                                    </div>
+                                                    <p className="text-xs text-gray-500 mt-1">Skip detailed scans</p>
+                                                </div>
+                                            </div>
+
+                                            <div>
+                                                <label className="block text-sm font-medium mb-2">Target Networks (CIDR)</label>
+                                                <textarea value={p.targets.join('\n')} onChange={e => { const u = [...networkPolicies]; u[i].targets = e.target.value.split('\n').filter(t => t.trim()); setNetworkPolicies(u); }} rows="4" className="w-full px-3 py-2 border rounded-lg font-mono text-sm" placeholder="192.168.0.0/24&#10;10.0.0.0/16" />
+                                                <p className="text-xs text-gray-500 mt-1">One network per line</p>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+
+                            {tab === 'device' && (
+                                <div className="space-y-6">
+                                    <div className="flex justify-between">
+                                        <h2 className="text-xl font-bold">Device Discovery Policies</h2>
+                                        <button onClick={() => setDevicePolicies([...devicePolicies, { name: `policy_${devicePolicies.length + 1}`, schedule: '0 */6 * * *', scheduleComment: 'Every 6 hours', defaultSite: 'Default', credentialRef: deviceCredentials[0]?.name || 'default', devices: [] }])} className="px-4 py-2 bg-blue-600 text-white rounded-lg">+ Add Policy</button>
+                                    </div>
+                                    {devicePolicies.map((p, i) => (
+                                        <div key={i} className="p-4 bg-gray-50 border-2 rounded-lg">
+                                            <div className="flex justify-between mb-3">
+                                                <input type="text" value={p.name} onChange={e => { const u = [...devicePolicies]; u[i].name = e.target.value; setDevicePolicies(u); }} className="font-semibold px-2 py-1 border rounded" />
+                                                <button onClick={() => setDevicePolicies(devicePolicies.filter((_, idx) => idx !== i))} className="text-red-600">Remove</button>
+                                            </div>
+                                            <div className="grid md:grid-cols-2 gap-4 mb-3">
+                                                <div>
+                                                    <label className="block text-sm font-medium mb-2">Default Site</label>
+                                                    <input type="text" value={p.defaultSite} onChange={e => { const u = [...devicePolicies]; u[i].defaultSite = e.target.value; setDevicePolicies(u); }} className="w-full px-3 py-2 border rounded-lg" />
+                                                </div>
+                                                {credentialMode !== 'inline' && (
+                                                    <div>
+                                                        <label className="block text-sm font-medium mb-2">Credentials</label>
+                                                        <select value={p.credentialRef} onChange={e => { const u = [...devicePolicies]; u[i].credentialRef = e.target.value; setDevicePolicies(u); }} className="w-full px-3 py-2 border rounded-lg">
+                                                            {deviceCredentials.map(c => <option key={c.name} value={c.name}>{c.name}</option>)}
+                                                        </select>
+                                                    </div>
+                                                )}
+                                            </div>
+                                            <div className="flex justify-between mb-2">
+                                                <label className="text-sm font-medium">Devices</label>
+                                                <button onClick={() => { const u = [...devicePolicies]; u[i].devices.push({ driver: 'ios', hostname: '', credentialOverride: '' }); setDevicePolicies(u); }} className="px-3 py-1 bg-green-600 text-white rounded text-sm">+ Add Device</button>
+                                            </div>
+                                            {p.devices.map((d, di) => (
+                                                <div key={di} className="grid grid-cols-3 gap-2 mb-2 p-2 bg-white border rounded">
+                                                    <select value={d.driver} onChange={e => { const u = [...devicePolicies]; u[i].devices[di].driver = e.target.value; setDevicePolicies(u); }} className="px-2 py-1 border rounded text-sm">
+                                                        <option value="ios">iOS</option>
+                                                        <option value="iosxe">IOS-XE</option>
+                                                        <option value="nxos">NX-OS</option>
+                                                        <option value="eos">EOS</option>
+                                                        <option value="junos">Junos</option>
+                                                    </select>
+                                                    <input type="text" value={d.hostname} onChange={e => { const u = [...devicePolicies]; u[i].devices[di].hostname = e.target.value; setDevicePolicies(u); }} placeholder="192.168.1.1" className="px-2 py-1 border rounded text-sm" />
+                                                    {credentialMode !== 'inline' && (
+                                                        <select value={d.credentialOverride} onChange={e => { const u = [...devicePolicies]; u[i].devices[di].credentialOverride = e.target.value; setDevicePolicies(u); }} className="px-2 py-1 border rounded text-sm">
+                                                            <option value="">Default</option>
+                                                            {deviceCredentials.map(c => <option key={c.name} value={c.name}>{c.name}</option>)}
+                                                        </select>
+                                                    )}
+                                                </div>
+                                            ))}
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+
+                            {tab === 'output' && (
+                                <div className="space-y-6">
+                                    <div>
+                                        <div className="flex justify-between mb-2">
+                                            <h3 className="font-semibold">.env File</h3>
+                                            <button onClick={() => dl(genEnv(), '.env')} className="px-4 py-2 bg-blue-600 text-white rounded-lg">Download</button>
+                                        </div>
+                                        <pre className="p-4 bg-gray-900 text-green-400 rounded-lg overflow-x-auto text-sm max-h-96">{genEnv()}</pre>
+                                    </div>
+                                    <div>
+                                        <div className="flex justify-between mb-2">
+                                            <h3 className="font-semibold">agent.yaml</h3>
+                                            <button onClick={() => dl(genYaml(), 'agent.yaml')} className="px-4 py-2 bg-blue-600 text-white rounded-lg">Download</button>
+                                        </div>
+                                        <pre className="p-4 bg-gray-900 text-green-400 rounded-lg overflow-x-auto text-sm max-h-96">{genYaml()}</pre>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        ReactDOM.render(<App />, document.getElementById('root'));
+    </script>
+</body>
+</html>
